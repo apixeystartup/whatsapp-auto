@@ -185,15 +185,26 @@ async function connectToWhatsApp() {
   // Save credentials on update
   sock.ev.on('creds.update', saveCreds);
 
+  // Use pairing code instead of QR (no scan needed)
+  // Only request pairing code if not already logged in
+  if (!state.creds.registered) {
+    const pairingCode = await sock.requestPairingCode(process.env.BUSINESS_PHONE || '918555874504');
+    console.log('\n╔══════════════════════════════════════╗');
+    console.log('║   LINK YOUR WHATSAPP WITH THIS CODE  ║');
+    console.log('╚══════════════════════════════════════╝');
+    console.log(`\n  📱 Your pairing code: ${pairingCode}\n`);
+    console.log('  How to link:');
+    console.log('  1. Open WhatsApp on your phone');
+    console.log('  2. Go to Settings → Linked Devices');
+    console.log('  3. Tap "Link a Device"');
+    console.log('  4. Tap "Link with phone number instead"');
+    console.log(`  5. Enter the code: ${pairingCode}`);
+    console.log('\n  Waiting for you to enter the code...\n');
+  }
+
   // Connection events
   sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect, qr } = update;
-
-    if (qr) {
-      console.log('\n📱 Scan this QR code with WhatsApp:\n');
-      qrcode.generate(qr, { small: true });
-      console.log('\n⏳ Waiting for QR scan...\n');
-    }
+    const { connection, lastDisconnect } = update;
 
     if (connection === 'close') {
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
