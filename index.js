@@ -8,7 +8,6 @@ const {
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const { Boom } = require('@hapi/boom');
-const qrcodeTerminal = require('qrcode-terminal');
 const QRCode = require('qrcode');
 const path = require('path');
 const fs = require('fs');
@@ -28,8 +27,11 @@ const SESSION_DIR = path.join(__dirname, 'session');
 const logger = pino({ level: 'silent' });
 let botEnabled = true;
 let sock = null;
+let latestQR = null;
+let botStatus = 'connecting';
 let reconnectAttempts = 0;
-const MAX_RECONNECT = 50;
+
+// ── Helpers ──────────────────────────────────────────────
 
 function findBestReply(userMessage) {
   const msg = userMessage.toLowerCase().trim();
@@ -130,12 +132,86 @@ async function sendReply(chatId, replyObj) {
   }
 }
 
-async function connectToWhatsApp() {
-  if (reconnectAttempts >= MAX_RECONNECT) {
-    console.log('Too many reconnect attempts. Stopping.');
-    process.exit(1);
+// ── HTTP Server (starts FIRST — Railway needs this) ─────
+
+const PORT = process.env.PORT || 3000;
+
+const server = http.createServer(async (req, res) => {
+  // Health check — Railway pings this
+  if (req.url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    return res.end('ok');
   }
 
+  // QR image endpoint
+  if (req.url === '/qr') {
+    if (latestQR) {
+      try {
+        const buf = await QRCode.toBuffer(latestQR, { width: 400, margin: 2 });
+        res.writeHead(200, { 'Content-Type': 'image/png' });
+        return res.end(buf);
+      } catch (e) {
+        res.writeHead(500);
+        return res.end('Error generating QR');
+      }
+    }
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    return res.end('QR not ready yet');
+  }
+
+  // Status endpoint
+  if (req.url === '/status') {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    return res.end('Bot status: ' + botStatus);
+  }
+
+  // Main page — QR scanner
+  const qrImg = latestQR
+    ? '<img src="/qr" style="width:350px;border:2px solid #333;border-radius:10px;" />'
+    : '<h2 style="color:orange;">QR generating...</h2>';
+
+  const statusColor = botStatus === 'connected' ? 'green' : 'orange';
+  const statusText = botStatus === 'connected'
+    ? 'Bot is live! Auto-reply active.'
+    : 'Waiting for QR scan...';
+
+  res.writeHead(200, { 'Content-Type': 'text/html' });
+  res.end(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WhatsApp Bot - QR Scanner</title>
+  <style>
+    body { font-family: Arial; text-align: center; padding: 40px; background: #f5f5f5; }
+    .card { background: white; border-radius: 15px; padding: 30px; max-width: 500px; margin: 0 auto; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+    h1 { color: #25D366; }
+    .status { padding: 8px 16px; border-radius: 20px; display: inline-block; color: white; background: ${statusColor}; margin: 10px 0; }
+    p { color: #666; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>WhatsApp Bot</h1>
+    <div class="status">${statusText}</div>
+    <hr>
+    ${qrImg}
+    <p>Open WhatsApp &rarr; Settings &rarr; Linked Devices &rarr; Link a Device</p>
+    <p>Scan the QR code above</p>
+    ${botStatus !== 'connected' ? '<p style="color:green;">Page refreshes every 5 seconds</p><script>setTimeout(()=>location.reload(),5000)</script>' : ''}
+  </div>
+</body>
+</html>`);
+});
+
+server.listen(PORT, '0.0.0.0', () => {
+  console.log('Web server running on port ' + PORT);
+  console.log('Open your Railway domain to scan QR\n');
+});
+
+// ── WhatsApp Connection (starts AFTER server) ───────────
+
+async function connectToWhatsApp() {
   try {
     if (!fs.existsSync(SESSION_DIR)) fs.mkdirSync(SESSION_DIR, { recursive: true });
 
@@ -163,10 +239,8 @@ async function connectToWhatsApp() {
 
       if (qr) {
         latestQR = qr;
-        console.log('\n=== QR CODE READY ===');
-        console.log('Open your Railway domain URL in browser to scan');
-        console.log('WhatsApp > Linked Devices > Link a Device\n');
-        qrcodeTerminal.generate(qr, { small: true });
+        botStatus = 'waiting_for_scan';
+        console.log('QR ready — open your Railway domain to scan');
       }
 
       if (connection === 'close') {
@@ -174,11 +248,12 @@ async function connectToWhatsApp() {
         console.log('Connection closed. Reason:', reason);
 
         if (reason === DisconnectReason.loggedOut) {
-          console.log('Logged out. Restarting fresh...');
+          botStatus = 'logged_out';
           try { fs.rmSync(SESSION_DIR, { recursive: true, force: true }); } catch (e) {}
           reconnectAttempts = 0;
           setTimeout(() => connectToWhatsApp(), 3000);
         } else {
+          botStatus = 'reconnecting';
           reconnectAttempts++;
           const waitTime = Math.min(reconnectAttempts * 2000, 30000);
           console.log('Reconnecting in ' + (waitTime / 1000) + 's...');
@@ -188,9 +263,9 @@ async function connectToWhatsApp() {
 
       if (connection === 'open') {
         reconnectAttempts = 0;
-        console.log('Connected to WhatsApp!');
-        console.log(BUSINESS_NAME + ' bot is running!');
-        console.log('Commands: /stop | /start | /status\n');
+        latestQR = null;
+        botStatus = 'connected';
+        console.log('Connected! Bot is live!');
       }
     });
 
@@ -225,53 +300,13 @@ async function connectToWhatsApp() {
 
   } catch (err) {
     console.error('Connection error:', err.message);
+    botStatus = 'error';
     reconnectAttempts++;
     setTimeout(() => connectToWhatsApp(), 5000);
   }
 }
 
-// HTTP server to serve QR code and keep Railway happy
-const PORT = process.env.PORT || 3000;
-let latestQR = null;
-
-const server = http.createServer((req, res) => {
-  if (req.url === '/qr') {
-    if (latestQR) {
-      QRCode.toBuffer(latestQR, { width: 400, margin: 2 }).then(buf => {
-        res.writeHead(200, { 'Content-Type': 'image/png' });
-        res.end(buf);
-      }).catch(() => {
-        res.writeHead(500);
-        res.end('Error');
-      });
-    } else {
-      res.writeHead(200, { 'Content-Type': 'text/html' });
-      res.end('<h1>QR not ready. Refresh in 5 seconds.</h1>');
-    }
-  } else if (req.url === '/health') {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('ok');
-  } else {
-    res.writeHead(200, { 'Content-Type': 'text/html' });
-    res.end(`
-      <html>
-      <head><title>WhatsApp QR Scanner</title></head>
-      <body style="text-align:center; font-family:Arial; padding:40px;">
-        <h1>Scan this QR with WhatsApp</h1>
-        ${latestQR ? '<img src="/qr" style="width:350px; border:2px solid #333; border-radius:10px;" />' : '<h2>QR not ready yet...</h2>'}
-        <p>Open WhatsApp > Settings > Linked Devices > Link a Device</p>
-        <p style="color:green;">Auto-refreshes every 5 seconds</p>
-        <script>setTimeout(()=>location.reload(), 5000);</script>
-      </body>
-      </html>
-    `);
-  }
-});
-
-server.listen(PORT, '0.0.0.0', () => {
-  console.log('Web server running on port ' + PORT);
-  console.log('QR page: http://localhost:' + PORT);
-});
+// ── Start ────────────────────────────────────────────────
 
 process.on('SIGINT', () => process.exit(0));
 process.on('uncaughtException', () => {});
@@ -281,4 +316,5 @@ console.log('Starting WhatsApp Bot...\n');
 if (!fs.existsSync(MEDIA_DIR)) fs.mkdirSync(MEDIA_DIR, { recursive: true });
 if (!fs.existsSync(SESSION_DIR)) fs.mkdirSync(SESSION_DIR, { recursive: true });
 
-connectToWhatsApp();
+// Start WhatsApp AFTER server is listening
+setTimeout(() => connectToWhatsApp(), 1000);
