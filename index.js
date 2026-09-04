@@ -162,17 +162,10 @@ async function connectToWhatsApp() {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
-        // Save QR as image file
-        try {
-          const qrBuffer = await QRCode.toBuffer(qr, { width: 400, margin: 2 });
-          const qrPath = path.join(__dirname, 'qr.png');
-          fs.writeFileSync(qrPath, qrBuffer);
-          console.log('\n=== QR CODE SAVED as qr.png ===\n');
-        } catch (e) {
-          console.log('QR save error:', e.message);
-        }
-
-        // Also show in terminal for local use
+        latestQR = qr;
+        console.log('\n=== QR CODE READY ===');
+        console.log('Open your Railway domain URL in browser to scan');
+        console.log('WhatsApp > Linked Devices > Link a Device\n');
         qrcodeTerminal.generate(qr, { small: true });
       }
 
@@ -237,19 +230,27 @@ async function connectToWhatsApp() {
   }
 }
 
-// HTTP server to serve QR code
+// HTTP server to serve QR code and keep Railway happy
 const PORT = process.env.PORT || 3000;
+let latestQR = null;
+
 const server = http.createServer((req, res) => {
   if (req.url === '/qr') {
-    const qrPath = path.join(__dirname, 'qr.png');
-    if (fs.existsSync(qrPath)) {
-      const img = fs.readFileSync(qrPath);
-      res.writeHead(200, { 'Content-Type': 'image/png' });
-      res.end(img);
+    if (latestQR) {
+      QRCode.toBuffer(latestQR, { width: 400, margin: 2 }).then(buf => {
+        res.writeHead(200, { 'Content-Type': 'image/png' });
+        res.end(buf);
+      }).catch(() => {
+        res.writeHead(500);
+        res.end('Error');
+      });
     } else {
       res.writeHead(200, { 'Content-Type': 'text/html' });
-      res.end('<h1>QR not ready yet. Refresh in a few seconds.</h1>');
+      res.end('<h1>QR not ready. Refresh in 5 seconds.</h1>');
     }
+  } else if (req.url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('ok');
   } else {
     res.writeHead(200, { 'Content-Type': 'text/html' });
     res.end(`
@@ -257,7 +258,7 @@ const server = http.createServer((req, res) => {
       <head><title>WhatsApp QR Scanner</title></head>
       <body style="text-align:center; font-family:Arial; padding:40px;">
         <h1>Scan this QR with WhatsApp</h1>
-        <img src="/qr" style="width:350px; border:2px solid #333; border-radius:10px;" />
+        ${latestQR ? '<img src="/qr" style="width:350px; border:2px solid #333; border-radius:10px;" />' : '<h2>QR not ready yet...</h2>'}
         <p>Open WhatsApp > Settings > Linked Devices > Link a Device</p>
         <p style="color:green;">Auto-refreshes every 5 seconds</p>
         <script>setTimeout(()=>location.reload(), 5000);</script>
@@ -266,7 +267,11 @@ const server = http.createServer((req, res) => {
     `);
   }
 });
-server.listen(PORT, () => console.log('QR viewer: http://localhost:' + PORT));
+
+server.listen(PORT, '0.0.0.0', () => {
+  console.log('Web server running on port ' + PORT);
+  console.log('QR page: http://localhost:' + PORT);
+});
 
 process.on('SIGINT', () => process.exit(0));
 process.on('uncaughtException', () => {});
