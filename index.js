@@ -8,6 +8,7 @@ const {
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const { Boom } = require('@hapi/boom');
+const qrcode = require('qrcode-terminal');
 const path = require('path');
 const fs = require('fs');
 require('dotenv').config();
@@ -134,7 +135,6 @@ async function connectToWhatsApp() {
   }
 
   try {
-    // Ensure session dir exists
     if (!fs.existsSync(SESSION_DIR)) fs.mkdirSync(SESSION_DIR, { recursive: true });
 
     const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
@@ -148,9 +148,10 @@ async function connectToWhatsApp() {
       },
       logger,
       printQRInTerminal: false,
-      browser: ['WhatsApp Auto Bot', 'Chrome', '4.0.0'],
+      browser: ['Firefox', 'Chrome', '120.0'],
       connectTimeout: 60000,
-      keepAliveIntervalMs: 30000,
+      keepAliveIntervalMs: 25000,
+      markOnlineOnConnect: false,
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -158,9 +159,10 @@ async function connectToWhatsApp() {
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
 
-      // Log QR for debugging
       if (qr) {
-        console.log('QR received - scan or use pairing code');
+        console.log('\n--- SCAN THIS QR CODE WITH YOUR PHONE ---\n');
+        qrcode.generate(qr, { small: true });
+        console.log('\nOpen WhatsApp > Linked Devices > Link a Device\n');
       }
 
       if (connection === 'close') {
@@ -185,29 +187,6 @@ async function connectToWhatsApp() {
         console.log('Connected to WhatsApp!');
         console.log(BUSINESS_NAME + ' bot is running!');
         console.log('Commands: /stop | /start | /status\n');
-
-        // Request pairing code if not registered
-        if (!state.creds.registered) {
-          await delay(2000);
-          try {
-            const phone = process.env.BUSINESS_PHONE || '918555874504';
-            const code = await sock.requestPairingCode(phone);
-            console.log('');
-            console.log('========================================');
-            console.log('  LINK YOUR WHATSAPP');
-            console.log('========================================');
-            console.log('  Code: ' + code);
-            console.log('');
-            console.log('  1. Open WhatsApp on your phone');
-            console.log('  2. Settings > Linked Devices');
-            console.log('  3. Tap "Link a Device"');
-            console.log('  4. Tap "Link with phone number"');
-            console.log('  5. Enter code: ' + code);
-            console.log('========================================\n');
-          } catch (e) {
-            console.log('Pairing code error:', e.message);
-          }
-        }
       }
     });
 
