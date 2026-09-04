@@ -4,19 +4,12 @@
   "description": "WhatsApp auto-reply bot with keyword-based responses",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "dev": "node --watch index.js",
-    "pm2:start": "pm2 start ecosystem.config.js",
-    "pm2:stop": "pm2 stop whatsapp-bot",
-    "pm2:logs": "pm2 logs whatsapp-bot",
-    "pm2:restart": "pm2 restart whatsapp-bot"
+    "start": "node index.js"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.16",
     "pino": "^9.6.0",
     "qrcode-terminal": "^0.12.0",
     "dotenv": "^16.4.7"
-  },
-  "keywords": ["whatsapp", "bot", "auto-reply", "automation"],
-  "license": "MIT"
+  }
 }

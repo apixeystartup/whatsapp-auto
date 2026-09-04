@@ -22,38 +22,28 @@ const {
   ADMIN_NUMBERS,
 } = require('./config');
 
-// ─── State ───────────────────────────────────────────────
 const SESSION_DIR = path.join(__dirname, 'session');
 const logger = pino({ level: 'silent' });
-let botEnabled = true; // toggle with /stop and /start
+let botEnabled = true;
 let sock = null;
+let isConnecting = false;
 
-// ─── Helpers ─────────────────────────────────────────────
-
-// Find best matching keyword from user message
 function findBestReply(userMessage) {
   const msg = userMessage.toLowerCase().trim();
-
-  // Exact match first
   for (const [keyword, reply] of Object.entries(KEYWORD_REPLIES)) {
     if (msg === keyword) return { text: reply };
   }
-
-  // Partial match — longest keyword wins
   let bestMatch = null;
   let bestLength = 0;
-
   for (const [keyword, reply] of Object.entries(KEYWORD_REPLIES)) {
     if (msg.includes(keyword) && keyword.length > bestLength) {
       bestMatch = { text: reply };
       bestLength = keyword.length;
     }
   }
-
   return bestMatch;
 }
 
-// Check for media reply
 function findMediaReply(userMessage) {
   const msg = userMessage.toLowerCase().trim();
   for (const [keyword, media] of Object.entries(MEDIA_REPLIES)) {
@@ -67,7 +57,6 @@ function findMediaReply(userMessage) {
   return null;
 }
 
-// Should we reply?
 function shouldReply(msg) {
   const chatId = msg.key.remoteJid;
   if (msg.key.fromMe) return false;
@@ -77,7 +66,6 @@ function shouldReply(msg) {
   return true;
 }
 
-// Extract text from message
 function getMessageText(msg) {
   const m = msg.message;
   if (!m) return null;
@@ -91,13 +79,11 @@ function getMessageText(msg) {
   );
 }
 
-// Check if sender is admin
 function isAdmin(msg) {
   const phone = msg.key.remoteJid.replace(/@s\.whatsapp\.net$/, '');
   return ADMIN_NUMBERS.includes(phone);
 }
 
-// Split message into chunks (max ~4000 chars each for WhatsApp)
 function splitMessage(text, maxLen = 4000) {
   if (text.length <= maxLen) return [text];
   const chunks = [];
@@ -107,7 +93,6 @@ function splitMessage(text, maxLen = 4000) {
       chunks.push(remaining);
       break;
     }
-    // Try to split at last newline before maxLen
     let splitIdx = remaining.lastIndexOf('\n', maxLen);
     if (splitIdx <= 0) splitIdx = maxLen;
     chunks.push(remaining.slice(0, splitIdx));
@@ -116,203 +101,160 @@ function splitMessage(text, maxLen = 4000) {
   return chunks;
 }
 
-// Send reply with typing indicator + media support + pagination
 async function sendReply(chatId, replyObj) {
-  // Handle text reply (with optional media)
-  if (replyObj.text) {
-    const chunks = splitMessage(replyObj.text);
-    for (let i = 0; i < chunks.length; i++) {
-      // Show typing indicator
-      await sock.sendPresenceUpdate('composing', chatId);
-      await delay(800 + Math.random() * 1200); // 0.8–2s realistic delay
-
-      await sock.sendMessage(chatId, { text: chunks[i] });
-
-      // Pause between chunks
-      if (i < chunks.length - 1) {
-        await delay(500);
+  try {
+    if (replyObj.text) {
+      const chunks = splitMessage(replyObj.text);
+      for (let i = 0; i < chunks.length; i++) {
+        await sock.sendPresenceUpdate('composing', chatId).catch(() => {});
+        await delay(800 + Math.random() * 1200);
+        await sock.sendMessage(chatId, { text: chunks[i] });
+        if (i < chunks.length - 1) await delay(500);
       }
-    }
-    await sock.sendPresenceUpdate('paused', chatId);
-  }
-
-  // Handle media reply
-  if (replyObj.filePath) {
-    await sock.sendPresenceUpdate('composing', chatId);
-    await delay(1000);
-
-    const ext = path.extname(replyObj.filePath).toLowerCase();
-    const buffer = fs.readFileSync(replyObj.filePath);
-
-    if (['.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(ext)) {
-      await sock.sendMessage(chatId, {
-        image: buffer,
-        caption: replyObj.caption || '',
-      });
-    } else if (['.mp4', '.mov'].includes(ext)) {
-      await sock.sendMessage(chatId, {
-        video: buffer,
-        caption: replyObj.caption || '',
-      });
-    } else {
-      await sock.sendMessage(chatId, {
-        document: buffer,
-        fileName: path.basename(replyObj.filePath),
-        caption: replyObj.caption || '',
-      });
+      await sock.sendPresenceUpdate('paused', chatId).catch(() => {});
     }
 
-    await sock.sendPresenceUpdate('paused', chatId);
+    if (replyObj.filePath && fs.existsSync(replyObj.filePath)) {
+      await sock.sendPresenceUpdate('composing', chatId).catch(() => {});
+      await delay(1000);
+      const ext = path.extname(replyObj.filePath).toLowerCase();
+      const buffer = fs.readFileSync(replyObj.filePath);
+      if (['.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(ext)) {
+        await sock.sendMessage(chatId, { image: buffer, caption: replyObj.caption || '' });
+      } else if (['.mp4', '.mov'].includes(ext)) {
+        await sock.sendMessage(chatId, { video: buffer, caption: replyObj.caption || '' });
+      } else {
+        await sock.sendMessage(chatId, { document: buffer, fileName: path.basename(replyObj.filePath), caption: replyObj.caption || '' });
+      }
+      await sock.sendPresenceUpdate('paused', chatId).catch(() => {});
+    }
+  } catch (err) {
+    console.error('Send error:', err.message);
   }
 }
 
-// ─── Main Connection ─────────────────────────────────────
 async function connectToWhatsApp() {
-  const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
-  const { version } = await fetchLatestBaileysVersion();
+  if (isConnecting) return;
+  isConnecting = true;
 
-  sock = makeWASocket({
-    version,
-    auth: {
-      creds: state.creds,
-      keys: makeCacheableSignalKeyStore(state.keys, logger),
-    },
-    logger,
-    printQRInTerminal: false,
-    browser: ['WhatsApp Auto Bot', 'Chrome', '4.0.0'],
-  });
+  try {
+    const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
+    const { version } = await fetchLatestBaileysVersion();
 
-  // Save credentials on update
-  sock.ev.on('creds.update', saveCreds);
+    sock = makeWASocket({
+      version,
+      auth: {
+        creds: state.creds,
+        keys: makeCacheableSignalKeyStore(state.keys, logger),
+      },
+      logger,
+      printQRInTerminal: false,
+      browser: ['WhatsApp Auto Bot', 'Chrome', '4.0.0'],
+    });
 
-  // Use pairing code instead of QR (no scan needed)
-  // Only request pairing code if not already logged in
-  if (!state.creds.registered) {
-    const pairingCode = await sock.requestPairingCode(process.env.BUSINESS_PHONE || '918555874504');
-    console.log('\n╔══════════════════════════════════════╗');
-    console.log('║   LINK YOUR WHATSAPP WITH THIS CODE  ║');
-    console.log('╚══════════════════════════════════════╝');
-    console.log(`\n  📱 Your pairing code: ${pairingCode}\n`);
-    console.log('  How to link:');
-    console.log('  1. Open WhatsApp on your phone');
-    console.log('  2. Go to Settings → Linked Devices');
-    console.log('  3. Tap "Link a Device"');
-    console.log('  4. Tap "Link with phone number instead"');
-    console.log(`  5. Enter the code: ${pairingCode}`);
-    console.log('\n  Waiting for you to enter the code...\n');
-  }
+    sock.ev.on('creds.update', saveCreds);
 
-  // Connection events
-  sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect } = update;
-
-    if (connection === 'close') {
-      const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
-      console.log(`\n⚠️  Connection closed. Reason: ${reason}`);
-
-      if (reason === DisconnectReason.loggedOut) {
-        console.log('❌ Logged out. Delete session/ folder and restart.');
-        process.exit(1);
-      }
-      console.log('🔄 Reconnecting in 3s...');
-      setTimeout(() => connectToWhatsApp(), 3000);
-    }
-
-    if (connection === 'open') {
-      console.log('✅ Connected to WhatsApp!');
-      console.log(`🤖 ${BUSINESS_NAME} Auto-Reply Bot is running!`);
-      console.log('💬 Waiting for incoming messages...\n');
-      console.log('Admin commands: /stop (pause bot) | /start (resume bot) | /status (check status)');
-      console.log('Press Ctrl+C to stop.\n');
-    }
-  });
-
-  // ─── Message Handler ───────────────────────────────────
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
-
-    for (const msg of messages) {
-      if (!shouldReply(msg)) continue;
-
-      const text = getMessageText(msg);
-      if (!text) continue;
-
-      const chatId = msg.key.remoteJid;
-      const senderName = msg.pushName || 'Unknown';
-
-      console.log(`📩 [${new Date().toLocaleTimeString()}] ${senderName}: ${text}`);
-
-      // ── Admin Commands ─────────────────────────────────
-      const cmd = text.trim().toLowerCase();
-
-      if (cmd === '/stop' && isAdmin(msg)) {
-        botEnabled = false;
-        await sock.sendMessage(chatId, { text: '🛑 Bot paused. Send /start to resume.' });
-        console.log(`🛑 Bot paused by admin ${senderName}`);
-        continue;
-      }
-
-      if (cmd === '/start' && isAdmin(msg)) {
-        botEnabled = true;
-        await sock.sendMessage(chatId, { text: '✅ Bot resumed! Auto-replies are active.' });
-        console.log(`✅ Bot resumed by admin ${senderName}`);
-        continue;
-      }
-
-      if (cmd === '/status' && isAdmin(msg)) {
-        const statusText = `📊 *Bot Status*\n\n• Status: ${botEnabled ? '🟢 Running' : '🔴 Paused'}\n• Keywords: ${Object.keys(KEYWORD_REPLIES).length}\n• Uptime: ${Math.floor(process.uptime() / 60)}m ${Math.floor(process.uptime() % 60)}s`;
-        await sock.sendMessage(chatId, { text: statusText });
-        continue;
-      }
-
-      // Skip if bot is paused
-      if (!botEnabled) continue;
-
-      // ── Find Reply ─────────────────────────────────────
-      // Check for media reply first
-      const mediaReply = findMediaReply(text);
-      if (mediaReply) {
-        await sendReply(chatId, { text: null, ...mediaReply });
-        console.log(`✅ [${new Date().toLocaleTimeString()}] Sent media to ${senderName}`);
-        continue;
-      }
-
-      // Text reply
-      const replyObj = findBestReply(text);
-      const replyText = replyObj ? replyObj.text : DEFAULT_REPLY;
-
+    // Request pairing code if new session
+    if (!state.creds.registered) {
       try {
-        await sendReply(chatId, { text: replyText });
-        console.log(`✅ [${new Date().toLocaleTimeString()}] Replied to ${senderName}`);
-      } catch (err) {
-        console.error(`❌ Failed to reply to ${senderName}:`, err.message);
+        const code = await sock.requestPairingCode(process.env.BUSINESS_PHONE || '918555874504');
+        console.log('\n=== LINK YOUR WHATSAPP ===');
+        console.log('Pairing code: ' + code);
+        console.log('Open WhatsApp > Settings > Linked Devices > Link with phone number');
+        console.log('Enter the code above\n');
+      } catch (e) {
+        console.log('Pairing code error:', e.message);
       }
     }
-  });
 
-  return sock;
+    sock.ev.on('connection.update', (update) => {
+      const { connection, lastDisconnect } = update;
+
+      if (connection === 'close') {
+        isConnecting = false;
+        const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
+        console.log('Connection closed. Reason:', reason);
+
+        if (reason === DisconnectReason.loggedOut) {
+          console.log('Logged out. Clearing session...');
+          try { fs.rmSync(SESSION_DIR, { recursive: true }); } catch (e) {}
+          process.exit(1);
+        }
+
+        setTimeout(() => connectToWhatsApp(), 5000);
+      }
+
+      if (connection === 'open') {
+        isConnecting = false;
+        console.log('Connected to WhatsApp!');
+        console.log(BUSINESS_NAME + ' bot is running!');
+        console.log('Commands: /stop | /start | /status\n');
+      }
+    });
+
+    sock.ev.on('messages.upsert', async ({ messages, type }) => {
+      if (type !== 'notify') return;
+
+      for (const msg of messages) {
+        try {
+          if (!shouldReply(msg)) continue;
+
+          const text = getMessageText(msg);
+          if (!text) continue;
+
+          const chatId = msg.key.remoteJid;
+          const senderName = msg.pushName || 'Unknown';
+          console.log('[' + new Date().toLocaleTimeString() + '] ' + senderName + ': ' + text);
+
+          const cmd = text.trim().toLowerCase();
+
+          if (cmd === '/stop' && isAdmin(msg)) {
+            botEnabled = false;
+            await sock.sendMessage(chatId, { text: 'Bot paused. Send /start to resume.' });
+            continue;
+          }
+
+          if (cmd === '/start' && isAdmin(msg)) {
+            botEnabled = true;
+            await sock.sendMessage(chatId, { text: 'Bot resumed!' });
+            continue;
+          }
+
+          if (cmd === '/status' && isAdmin(msg)) {
+            await sock.sendMessage(chatId, { text: 'Status: ' + (botEnabled ? 'Running' : 'Paused') + '\nUptime: ' + Math.floor(process.uptime() / 60) + 'm' });
+            continue;
+          }
+
+          if (!botEnabled) continue;
+
+          const mediaReply = findMediaReply(text);
+          if (mediaReply) {
+            await sendReply(chatId, { text: null, ...mediaReply });
+            continue;
+          }
+
+          const replyObj = findBestReply(text);
+          const replyText = replyObj ? replyObj.text : DEFAULT_REPLY;
+          await sendReply(chatId, { text: replyText });
+          console.log('Replied to ' + senderName);
+        } catch (err) {
+          console.error('Message handler error:', err.message);
+        }
+      }
+    });
+  } catch (err) {
+    console.error('Connection error:', err.message);
+    isConnecting = false;
+    setTimeout(() => connectToWhatsApp(), 5000);
+  }
 }
 
-// ─── Process Handlers ────────────────────────────────────
-process.on('SIGINT', () => {
-  console.log('\n\n🛑 Shutting down bot...');
-  process.exit(0);
-});
+process.on('SIGINT', () => process.exit(0));
+process.on('uncaughtException', (err) => console.error('Uncaught:', err.message));
+process.on('unhandledRejection', (err) => console.error('Unhandled:', err));
 
-process.on('uncaughtException', (err) => {
-  console.error('❌ Uncaught Exception:', err);
-});
+console.log('Starting WhatsApp Bot...\n');
+if (!fs.existsSync(MEDIA_DIR)) fs.mkdirSync(MEDIA_DIR, { recursive: true });
+if (!fs.existsSync(SESSION_DIR)) fs.mkdirSync(SESSION_DIR, { recursive: true });
 
-// ─── Start ───────────────────────────────────────────────
-console.log('🚀 Starting WhatsApp Auto-Reply Bot...\n');
-
-// Ensure media directory exists
-if (!fs.existsSync(MEDIA_DIR)) {
-  fs.mkdirSync(MEDIA_DIR, { recursive: true });
-  console.log('📁 Created media/ folder — place images/docs here for media replies.\n');
-}
-
-connectToWhatsApp().catch((err) => {
-  console.error('❌ Failed to start bot:', err);
-  process.exit(1);
-});
+connectToWhatsApp();

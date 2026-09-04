@@ -1,0 +1,7 @@
+node_modules
+npm-debug.log
+session
+.env
+logs
+media/*
+!media/.gitkeep
