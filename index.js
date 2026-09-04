@@ -12,6 +12,7 @@ const qrcodeTerminal = require('qrcode-terminal');
 const QRCode = require('qrcode');
 const path = require('path');
 const fs = require('fs');
+const http = require('http');
 require('dotenv').config();
 
 const {
@@ -161,15 +162,12 @@ async function connectToWhatsApp() {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
-        // Save QR as image file (downloadable from Railway)
+        // Save QR as image file
         try {
           const qrBuffer = await QRCode.toBuffer(qr, { width: 400, margin: 2 });
           const qrPath = path.join(__dirname, 'qr.png');
           fs.writeFileSync(qrPath, qrBuffer);
-          console.log('\n=== QR CODE SAVED ===');
-          console.log('Download qr.png from your project files and scan it.');
-          console.log('In Railway: click Files tab > qr.png > Download');
-          console.log('Then scan with WhatsApp > Linked Devices > Link a Device\n');
+          console.log('\n=== QR CODE SAVED as qr.png ===\n');
         } catch (e) {
           console.log('QR save error:', e.message);
         }
@@ -238,6 +236,37 @@ async function connectToWhatsApp() {
     setTimeout(() => connectToWhatsApp(), 5000);
   }
 }
+
+// HTTP server to serve QR code
+const PORT = process.env.PORT || 3000;
+const server = http.createServer((req, res) => {
+  if (req.url === '/qr') {
+    const qrPath = path.join(__dirname, 'qr.png');
+    if (fs.existsSync(qrPath)) {
+      const img = fs.readFileSync(qrPath);
+      res.writeHead(200, { 'Content-Type': 'image/png' });
+      res.end(img);
+    } else {
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end('<h1>QR not ready yet. Refresh in a few seconds.</h1>');
+    }
+  } else {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(`
+      <html>
+      <head><title>WhatsApp QR Scanner</title></head>
+      <body style="text-align:center; font-family:Arial; padding:40px;">
+        <h1>Scan this QR with WhatsApp</h1>
+        <img src="/qr" style="width:350px; border:2px solid #333; border-radius:10px;" />
+        <p>Open WhatsApp > Settings > Linked Devices > Link a Device</p>
+        <p style="color:green;">Auto-refreshes every 5 seconds</p>
+        <script>setTimeout(()=>location.reload(), 5000);</script>
+      </body>
+      </html>
+    `);
+  }
+});
+server.listen(PORT, () => console.log('QR viewer: http://localhost:' + PORT));
 
 process.on('SIGINT', () => process.exit(0));
 process.on('uncaughtException', () => {});
