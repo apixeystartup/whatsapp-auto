@@ -148,7 +148,7 @@ async function connectToWhatsApp() {
       },
       logger,
       printQRInTerminal: false,
-      browser: ['Firefox', 'Chrome', '120.0'],
+      browser: ['Firefox', 'Safari', '120.0'],
       connectTimeout: 60000,
       keepAliveIntervalMs: 25000,
       markOnlineOnConnect: false,
@@ -160,9 +160,9 @@ async function connectToWhatsApp() {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
-        console.log('\n--- SCAN THIS QR CODE WITH YOUR PHONE ---\n');
+        console.log('\n--- SCAN THIS QR CODE ---\n');
         qrcode.generate(qr, { small: true });
-        console.log('\nOpen WhatsApp > Linked Devices > Link a Device\n');
+        console.log('\nWhatsApp > Linked Devices > Link a Device\n');
       }
 
       if (connection === 'close') {
@@ -177,7 +177,7 @@ async function connectToWhatsApp() {
         } else {
           reconnectAttempts++;
           const waitTime = Math.min(reconnectAttempts * 2000, 30000);
-          console.log('Reconnecting in ' + (waitTime / 1000) + 's (attempt ' + reconnectAttempts + ')...');
+          console.log('Reconnecting in ' + (waitTime / 1000) + 's...');
           setTimeout(() => connectToWhatsApp(), waitTime);
         }
       }
@@ -227,8 +227,8 @@ async function connectToWhatsApp() {
 }
 
 process.on('SIGINT', () => process.exit(0));
-process.on('uncaughtException', (err) => console.error('Uncaught:', err.message));
-process.on('unhandledRejection', (err) => console.error('Unhandled:', err));
+process.on('uncaughtException', () => {});
+process.on('unhandledRejection', () => {});
 
 console.log('Starting WhatsApp Bot...\n');
 if (!fs.existsSync(MEDIA_DIR)) fs.mkdirSync(MEDIA_DIR, { recursive: true });
