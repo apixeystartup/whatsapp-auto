@@ -8,7 +8,8 @@ const {
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const { Boom } = require('@hapi/boom');
-const qrcode = require('qrcode-terminal');
+const qrcodeTerminal = require('qrcode-terminal');
+const QRCode = require('qrcode');
 const path = require('path');
 const fs = require('fs');
 require('dotenv').config();
@@ -160,9 +161,21 @@ async function connectToWhatsApp() {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
-        console.log('\n--- SCAN THIS QR CODE ---\n');
-        qrcode.generate(qr, { small: true });
-        console.log('\nWhatsApp > Linked Devices > Link a Device\n');
+        // Save QR as image file (downloadable from Railway)
+        try {
+          const qrBuffer = await QRCode.toBuffer(qr, { width: 400, margin: 2 });
+          const qrPath = path.join(__dirname, 'qr.png');
+          fs.writeFileSync(qrPath, qrBuffer);
+          console.log('\n=== QR CODE SAVED ===');
+          console.log('Download qr.png from your project files and scan it.');
+          console.log('In Railway: click Files tab > qr.png > Download');
+          console.log('Then scan with WhatsApp > Linked Devices > Link a Device\n');
+        } catch (e) {
+          console.log('QR save error:', e.message);
+        }
+
+        // Also show in terminal for local use
+        qrcodeTerminal.generate(qr, { small: true });
       }
 
       if (connection === 'close') {
