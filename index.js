@@ -8,7 +8,6 @@ const {
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const { Boom } = require('@hapi/boom');
-const qrcode = require('qrcode-terminal');
 const path = require('path');
 const fs = require('fs');
 require('dotenv').config();
@@ -26,7 +25,8 @@ const SESSION_DIR = path.join(__dirname, 'session');
 const logger = pino({ level: 'silent' });
 let botEnabled = true;
 let sock = null;
-let isConnecting = false;
+let reconnectAttempts = 0;
+const MAX_RECONNECT = 50;
 
 function findBestReply(userMessage) {
   const msg = userMessage.toLowerCase().trim();
@@ -49,9 +49,7 @@ function findMediaReply(userMessage) {
   for (const [keyword, media] of Object.entries(MEDIA_REPLIES)) {
     if (msg.includes(keyword)) {
       const filePath = path.join(MEDIA_DIR, media.file);
-      if (fs.existsSync(filePath)) {
-        return { filePath, caption: media.caption || '' };
-      }
+      if (fs.existsSync(filePath)) return { filePath, caption: media.caption || '' };
     }
   }
   return null;
@@ -89,10 +87,7 @@ function splitMessage(text, maxLen = 4000) {
   const chunks = [];
   let remaining = text;
   while (remaining.length > 0) {
-    if (remaining.length <= maxLen) {
-      chunks.push(remaining);
-      break;
-    }
+    if (remaining.length <= maxLen) { chunks.push(remaining); break; }
     let splitIdx = remaining.lastIndexOf('\n', maxLen);
     if (splitIdx <= 0) splitIdx = maxLen;
     chunks.push(remaining.slice(0, splitIdx));
@@ -113,7 +108,6 @@ async function sendReply(chatId, replyObj) {
       }
       await sock.sendPresenceUpdate('paused', chatId).catch(() => {});
     }
-
     if (replyObj.filePath && fs.existsSync(replyObj.filePath)) {
       await sock.sendPresenceUpdate('composing', chatId).catch(() => {});
       await delay(1000);
@@ -134,10 +128,15 @@ async function sendReply(chatId, replyObj) {
 }
 
 async function connectToWhatsApp() {
-  if (isConnecting) return;
-  isConnecting = true;
+  if (reconnectAttempts >= MAX_RECONNECT) {
+    console.log('Too many reconnect attempts. Stopping.');
+    process.exit(1);
+  }
 
   try {
+    // Ensure session dir exists
+    if (!fs.existsSync(SESSION_DIR)) fs.mkdirSync(SESSION_DIR, { recursive: true });
+
     const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
     const { version } = await fetchLatestBaileysVersion();
 
@@ -150,101 +149,100 @@ async function connectToWhatsApp() {
       logger,
       printQRInTerminal: false,
       browser: ['WhatsApp Auto Bot', 'Chrome', '4.0.0'],
+      connectTimeout: 60000,
+      keepAliveIntervalMs: 30000,
     });
 
     sock.ev.on('creds.update', saveCreds);
 
-    // Request pairing code if new session
-    if (!state.creds.registered) {
-      try {
-        const code = await sock.requestPairingCode(process.env.BUSINESS_PHONE || '918555874504');
-        console.log('\n=== LINK YOUR WHATSAPP ===');
-        console.log('Pairing code: ' + code);
-        console.log('Open WhatsApp > Settings > Linked Devices > Link with phone number');
-        console.log('Enter the code above\n');
-      } catch (e) {
-        console.log('Pairing code error:', e.message);
-      }
-    }
+    sock.ev.on('connection.update', async (update) => {
+      const { connection, lastDisconnect, qr } = update;
 
-    sock.ev.on('connection.update', (update) => {
-      const { connection, lastDisconnect } = update;
+      // Log QR for debugging
+      if (qr) {
+        console.log('QR received - scan or use pairing code');
+      }
 
       if (connection === 'close') {
-        isConnecting = false;
         const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
         console.log('Connection closed. Reason:', reason);
 
         if (reason === DisconnectReason.loggedOut) {
-          console.log('Logged out. Clearing session...');
-          try { fs.rmSync(SESSION_DIR, { recursive: true }); } catch (e) {}
-          process.exit(1);
+          console.log('Logged out. Restarting fresh...');
+          try { fs.rmSync(SESSION_DIR, { recursive: true, force: true }); } catch (e) {}
+          reconnectAttempts = 0;
+          setTimeout(() => connectToWhatsApp(), 3000);
+        } else {
+          reconnectAttempts++;
+          const waitTime = Math.min(reconnectAttempts * 2000, 30000);
+          console.log('Reconnecting in ' + (waitTime / 1000) + 's (attempt ' + reconnectAttempts + ')...');
+          setTimeout(() => connectToWhatsApp(), waitTime);
         }
-
-        setTimeout(() => connectToWhatsApp(), 5000);
       }
 
       if (connection === 'open') {
-        isConnecting = false;
+        reconnectAttempts = 0;
         console.log('Connected to WhatsApp!');
         console.log(BUSINESS_NAME + ' bot is running!');
         console.log('Commands: /stop | /start | /status\n');
+
+        // Request pairing code if not registered
+        if (!state.creds.registered) {
+          await delay(2000);
+          try {
+            const phone = process.env.BUSINESS_PHONE || '918555874504';
+            const code = await sock.requestPairingCode(phone);
+            console.log('');
+            console.log('========================================');
+            console.log('  LINK YOUR WHATSAPP');
+            console.log('========================================');
+            console.log('  Code: ' + code);
+            console.log('');
+            console.log('  1. Open WhatsApp on your phone');
+            console.log('  2. Settings > Linked Devices');
+            console.log('  3. Tap "Link a Device"');
+            console.log('  4. Tap "Link with phone number"');
+            console.log('  5. Enter code: ' + code);
+            console.log('========================================\n');
+          } catch (e) {
+            console.log('Pairing code error:', e.message);
+          }
+        }
       }
     });
 
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
       if (type !== 'notify') return;
-
       for (const msg of messages) {
         try {
           if (!shouldReply(msg)) continue;
-
           const text = getMessageText(msg);
           if (!text) continue;
-
           const chatId = msg.key.remoteJid;
           const senderName = msg.pushName || 'Unknown';
           console.log('[' + new Date().toLocaleTimeString() + '] ' + senderName + ': ' + text);
 
           const cmd = text.trim().toLowerCase();
-
-          if (cmd === '/stop' && isAdmin(msg)) {
-            botEnabled = false;
-            await sock.sendMessage(chatId, { text: 'Bot paused. Send /start to resume.' });
-            continue;
-          }
-
-          if (cmd === '/start' && isAdmin(msg)) {
-            botEnabled = true;
-            await sock.sendMessage(chatId, { text: 'Bot resumed!' });
-            continue;
-          }
-
-          if (cmd === '/status' && isAdmin(msg)) {
-            await sock.sendMessage(chatId, { text: 'Status: ' + (botEnabled ? 'Running' : 'Paused') + '\nUptime: ' + Math.floor(process.uptime() / 60) + 'm' });
-            continue;
-          }
-
+          if (cmd === '/stop' && isAdmin(msg)) { botEnabled = false; await sock.sendMessage(chatId, { text: 'Bot paused.' }); continue; }
+          if (cmd === '/start' && isAdmin(msg)) { botEnabled = true; await sock.sendMessage(chatId, { text: 'Bot resumed!' }); continue; }
+          if (cmd === '/status' && isAdmin(msg)) { await sock.sendMessage(chatId, { text: 'Status: ' + (botEnabled ? 'Running' : 'Paused') }); continue; }
           if (!botEnabled) continue;
 
           const mediaReply = findMediaReply(text);
-          if (mediaReply) {
-            await sendReply(chatId, { text: null, ...mediaReply });
-            continue;
-          }
+          if (mediaReply) { await sendReply(chatId, { text: null, ...mediaReply }); continue; }
 
           const replyObj = findBestReply(text);
-          const replyText = replyObj ? replyObj.text : DEFAULT_REPLY;
-          await sendReply(chatId, { text: replyText });
+          await sendReply(chatId, { text: replyObj ? replyObj.text : DEFAULT_REPLY });
           console.log('Replied to ' + senderName);
         } catch (err) {
-          console.error('Message handler error:', err.message);
+          console.error('Message error:', err.message);
         }
       }
     });
+
   } catch (err) {
     console.error('Connection error:', err.message);
-    isConnecting = false;
+    reconnectAttempts++;
     setTimeout(() => connectToWhatsApp(), 5000);
   }
 }
